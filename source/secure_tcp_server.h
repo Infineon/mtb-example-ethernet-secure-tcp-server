@@ -5,7 +5,7 @@
 * secure TCP server operation.
 *
 *******************************************************************************
-* Copyright 2022, Cypress Semiconductor Corporation (an Infineon company) or
+* Copyright 2022-2024, Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
 *
 * This software, including source code, documentation and related
@@ -48,6 +48,11 @@
                                                        (((uint32_t) c) << 16) | \
                                                        (((uint32_t) b) << 8) | \
                                                        ((uint32_t) a))
+
+/* Set this macro to '1' to enable IPv6 protocol. Default value is '0' to use
+ * IPv4 protocol.
+ */
+#define USE_IPV6_ADDRESS                          (0)
 
 /* TCP server related macros. */
 #define TCP_SERVER_PORT                           (50007)

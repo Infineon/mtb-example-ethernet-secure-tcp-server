@@ -5,7 +5,7 @@
 * TCP server operation.
 *
 *******************************************************************************
-* Copyright 2022, Cypress Semiconductor Corporation (an Infineon company) or
+* Copyright 2022-2024, Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
 *
 * This software, including source code, documentation and related
@@ -67,9 +67,16 @@
 /* Network credentials header file */
 #include "network_credentials.h"
 
+/* IP address related header files (part of the lwIP TCP/IP stack). */
+#include "ip_addr.h"
+
+/* PHY driver APIs */
+#include "cy_eth_phy_driver.h"
+
+
 /*******************************************************************************
 * Macros
-********************************************************************************/                                     
+********************************************************************************/
 
 /* Maximum number of connection retries to the ethernet network */
 #define MAX_ETH_RETRY_COUNT                            (3u)
@@ -84,6 +91,12 @@
 /* Interrupt priority of the user button. */
 #define USER_BTN_INTR_PRIORITY                         (5)
 
+/* Ethernet interface ID */
+#ifdef XMC7100D_F176K4160
+#define INTERFACE_ID                        CY_ECM_INTERFACE_ETH0
+#else
+#define INTERFACE_ID                        CY_ECM_INTERFACE_ETH1
+#endif
 /*******************************************************************************
 * Function Prototypes
 ********************************************************************************/
@@ -276,6 +289,19 @@ void tcp_secure_server_task(void *arg)
     }
  }
 
+cy_ecm_phy_callbacks_t phy_callbacks =
+{
+        .phy_init = cy_eth_phy_init,
+        .phy_configure = cy_eth_phy_configure,
+        .phy_enable_ext_reg = cy_eth_phy_enable_ext_reg,
+        .phy_discover = cy_eth_phy_discover,
+        .phy_get_auto_neg_status = cy_eth_phy_get_auto_neg_status,
+        .phy_get_link_partner_cap = cy_eth_phy_get_link_partner_cap,
+        .phy_get_linkspeed = cy_eth_phy_get_linkspeed,
+        .phy_get_linkstatus = cy_eth_phy_get_linkstatus,
+        .phy_reset = cy_eth_phy_reset
+};
+
 /*******************************************************************************
  * Function Name: connect_ethernet
  *******************************************************************************
@@ -297,12 +323,7 @@ cy_rslt_t connect_to_ethernet(void)
     uint8_t retry_count = 0;
 
     /* Variables used by ethernet connection manager.*/
-    cy_ecm_phy_config_t ecm_phy_config;
     cy_ecm_ip_address_t ip_addr;
-
-    ecm_phy_config.interface_speed_type = CY_ECM_SPEED_TYPE_RGMII;
-    ecm_phy_config.mode = CY_ECM_DUPLEX_AUTO;
-    ecm_phy_config.phy_speed = CY_ECM_PHY_SPEED_AUTO;
 
     /* Initialize ethernet connection manager. */
     result = cy_ecm_init();
@@ -316,10 +337,8 @@ cy_rslt_t connect_to_ethernet(void)
         printf("Ethernet connection manager initialized.\n");
     }
 
-    /* To change the MAC address,enter the desired MAC as the second parameter 
-    in cy_ecm_ethif_init() instead of NULL. Default MAC address(00-03-19-45-00-00) 
-    is used when NULL is passed. */
-    result =  cy_ecm_ethif_init(CY_ECM_INTERFACE_ETH1, NULL, &ecm_phy_config, &ecm_handle);
+    /* Initialize the Ethernet interface and PHY driver */
+    result =  cy_ecm_ethif_init(INTERFACE_ID, &phy_callbacks, &ecm_handle);
     if (result != CY_RSLT_SUCCESS)
     {
         printf("Ethernet interface initialization failed! Error code: 0x%08"PRIx32"\n", (uint32_t)result);
@@ -344,13 +363,25 @@ cy_rslt_t connect_to_ethernet(void)
         else
         {
             printf("Successfully connected to ethernet.\n");
-            printf("IP Address Assigned: %d.%d.%d.%d\n", (uint8)ip_addr.ip.v4,(uint8)(ip_addr.ip.v4 >> 8), (uint8)(ip_addr.ip.v4 >> 16),
-                    (uint8)(ip_addr.ip.v4 >> 24));
+
+        #if(USE_IPV6_ADDRESS)
+            result = cy_ecm_get_ipv6_address(ecm_handle, CY_ECM_IPV6_LINK_LOCAL, &ip_addr);
+            if(result == CY_RSLT_SUCCESS)
+            {
+                printf("IPv6 address (link-local) assigned: %s\n",
+                        ip6addr_ntoa((const ip6_addr_t*)&ip_addr.ip.v6));
+                memcpy(ip_addr.ip.v6, tcp_server_addr.ip_address.ip.v6, sizeof(ip_addr.ip.v6));
+                tcp_server_addr.ip_address.version = CY_SOCKET_IP_VER_V6;
+                tcp_server_addr.port = TCP_SERVER_PORT;
+            }
+        #else
+            printf("IPv4 address assigned: %s\n", ip4addr_ntoa((const ip4_addr_t*)&ip_addr.ip.v4));
 
             /* IP address and TCP port number of the TCP server */
             tcp_server_addr.ip_address.ip.v4 = ip_addr.ip.v4;
             tcp_server_addr.ip_address.version = CY_SOCKET_IP_VER_V4;
             tcp_server_addr.port = TCP_SERVER_PORT;
+        #endif
 
             break;
         }
@@ -385,8 +416,13 @@ cy_rslt_t create_secure_tcp_server_socket(void)
     cy_socket_tls_auth_mode_t tls_auth_mode = CY_SOCKET_TLS_VERIFY_REQUIRED;
 
     /* Create a Secure TCP socket. */
+#if(USE_IPV6_ADDRESS)
+    result = cy_socket_create(CY_SOCKET_DOMAIN_AF_INET6, CY_SOCKET_TYPE_STREAM,
+                                  CY_SOCKET_IPPROTO_TLS, &server_handle);
+#else
     result = cy_socket_create(CY_SOCKET_DOMAIN_AF_INET, CY_SOCKET_TYPE_STREAM,
                                   CY_SOCKET_IPPROTO_TLS, &server_handle);
+#endif
     if(result != CY_RSLT_SUCCESS)
     {
         printf("Failed to create socket! Error code: %"PRIu32"\n", result);
@@ -632,7 +668,7 @@ void isr_button_press( void *callback_arg, cyhal_gpio_event_t event)
     {
         led_state_cmd = LED_ON_CMD;
     }
-    
+
     /* Set the flag to send command to TCP client. */
     xTaskNotifyFromISR(server_task_handle, led_state_cmd,
                       eSetValueWithoutOverwrite, &xHigherPriorityTaskWoken);
